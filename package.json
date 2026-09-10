@@ -1,0 +1,14 @@
+{
+  "name": "voler-scam-guard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Discord anti-scam bot + dashboard admin",
+  "scripts": {
+    "sync:schema": "./scripts/sync-schema.sh",
+    "typecheck": "npm --prefix bot run typecheck && npm --prefix dashboard run typecheck",
+    "backup": "./scripts/backup.sh",
+    "up": "docker compose up -d --build",
+    "down": "docker compose down",
+    "logs": "docker compose logs -f bot dashboard"
+  }
+}

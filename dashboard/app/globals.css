@@ -1,0 +1,30 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink-950: #0b0e14;
+  --color-ink-900: #11151d;
+  --color-ink-800: #171c26;
+  --color-ink-700: #222937;
+  --color-ink-600: #2f3849;
+  --color-ink-400: #7b8798;
+  --color-ink-200: #c3cad6;
+  --color-brand-500: #4f7cff;
+  --color-brand-400: #6f95ff;
+  --color-danger-500: #e2483c;
+  --color-warn-500: #e2953c;
+  --color-ok-500: #35b37e;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-ink-950);
+  color: var(--color-ink-200);
+}
+
+/* Scrollbar tipis supaya tabel log yang lebar tidak berisik. */
+::-webkit-scrollbar { height: 8px; width: 8px; }
+::-webkit-scrollbar-thumb { background: var(--color-ink-700); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }

@@ -1,0 +1,82 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vsg-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${DB_NAME:-voler_scam_guard}
+      POSTGRES_USER: ${DB_USER:?DB_USER wajib diisi di .env}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD wajib diisi di .env}
+    ports:
+      # Sengaja diikat ke loopback: cukup untuk psql dan menjalankan bot/dashboard
+      # dari luar container saat development, tapi tidak terbuka ke internet.
+      - "127.0.0.1:${DB_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Skrip di sini hanya jalan saat volume pgdata masih kosong.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME:-voler_scam_guard}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [vsg]
+
+  bot:
+    build: ./bot
+    container_name: vsg-bot
+    restart: always
+    init: true
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-voler_scam_guard}
+      TESSDATA_PATH: /app/tessdata
+    volumes:
+      - tessdata:/app/tessdata
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [vsg]
+
+  dashboard:
+    build: ./dashboard
+    container_name: vsg-dashboard
+    restart: always
+    init: true
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-voler_scam_guard}
+    expose:
+      - "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [vsg]
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: vsg-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN:?DASHBOARD_DOMAIN wajib diisi di .env}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - dashboard
+    networks: [vsg]
+
+volumes:
+  pgdata:
+  tessdata:
+  caddy_data:
+  caddy_config:
+
+networks:
+  vsg:
+    driver: bridge

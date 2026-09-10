@@ -1,0 +1,26 @@
+{
+	email {$ACME_EMAIL}
+}
+
+# Domain diambil dari DASHBOARD_DOMAIN di .env. Caddy mengurus sertifikat
+# Let's Encrypt otomatis begitu A record sudah mengarah ke IP VPS ini.
+{$DASHBOARD_DOMAIN} {
+	encode zstd gzip
+
+	# Dashboard berisi data moderasi — jangan diindeks mesin pencari.
+	header {
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		X-Robots-Tag "noindex, nofollow"
+	}
+
+	reverse_proxy dashboard:3000
+
+	log {
+		output file /data/access.log {
+			roll_size 10mb
+			roll_keep 5
+		}
+	}
+}

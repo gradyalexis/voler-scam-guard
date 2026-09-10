@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.next/
+tessdata/
+*.log
+
+.env
+.env.local
+.env.*.local
+
+backups/
+tsconfig.tsbuildinfo
