@@ -196,11 +196,15 @@ Matikan lewat `SCAN_QR_CODES=false` di `.env` kalau tidak diperlukan.
 ## Development lokal
 
 ```bash
-docker compose up -d postgres
+docker compose up -d postgres     # port 5433 di loopback host
 
 cd bot       && npm install && cp ../.env .env && npm run dev
 cd dashboard && npm install && npm run dev     # http://localhost:3000
 ```
+
+Container Postgres mempublish `127.0.0.1:${DB_PORT:-5433}` — cukup untuk `psql`
+dan menjalankan bot/dashboard di luar container, tapi tidak terbuka dari luar
+mesin. Ganti `DB_PORT` di `.env` kalau 5433 sudah dipakai.
 
 Untuk dev, set `DASHBOARD_URL=http://localhost:3000` dan tambahkan redirect URI
 yang sama di Discord OAuth2. Slash command didaftarkan global saat bot start
@@ -213,6 +217,36 @@ Perintah bantu di root:
 npm run typecheck     # typecheck bot + dashboard
 npm run sync:schema   # salin bot/src/db/schema.ts -> dashboard/lib/db/schema.ts
 npm run logs          # docker compose logs -f bot dashboard
+```
+
+## Akses database untuk Claude Code
+
+Supaya Claude bisa memeriksa isi database sendiri tanpa minta izin tiap query —
+tapi tetap tidak bisa mengubah data diam-diam — akses dipisah jadi dua jalur.
+
+```bash
+./scripts/create-readonly-role.sh                      # sekali saja, buat role vsg_ro
+./scripts/db-read.sh  "SELECT count(*) FROM detection_logs"   # SELECT saja
+./scripts/db-write.sh "DELETE FROM blacklist_domains WHERE id=3"  # hak tulis penuh
+```
+
+`db-read.sh` memakai role `vsg_ro` yang hanya punya `SELECT`; percobaan menulis
+ditolak oleh Postgres sendiri, bukan sekadar oleh konvensi:
+
+```
+$ ./scripts/db-read.sh "DELETE FROM detection_logs"
+ERROR:  permission denied for table detection_logs
+```
+
+`.claude/settings.json` meng-allowlist `db-read.sh` saja. `db-write.sh` sengaja
+dimasukkan ke daftar `ask`, jadi setiap INSERT/UPDATE/DELETE/DDL yang dijalankan
+Claude tetap kamu lihat SQL-nya dan setujui dulu. Jalankan keduanya dari root
+project supaya cocok dengan aturan allowlist.
+
+Kalau database ada di VPS, tidak perlu membuka port ke internet — bungkus lewat SSH:
+
+```bash
+ssh user@vps 'cd /opt/voler-scam-guard && ./scripts/db-read.sh "SELECT ..."'
 ```
 
 ## Backup
@@ -239,7 +273,8 @@ voler-scam-guard/
 ├── .env.example
 ├── db/init/            # SQL schema + seed (dijalankan postgres saat init)
 ├── caddy/Caddyfile     # reverse proxy + auto HTTPS
-├── scripts/            # backup, restore, sync schema
+├── .claude/            # allowlist permission untuk akses DB read-only
+├── scripts/            # backup, restore, sync schema, akses DB
 ├── bot/
 │   └── src/
 │       ├── index.ts            # bootstrap client, register command, shutdown

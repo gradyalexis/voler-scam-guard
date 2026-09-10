@@ -10,3 +10,6 @@ tessdata/
 
 backups/
 tsconfig.tsbuildinfo
+
+# Setting lokal per-mesin; .claude/settings.json sengaja di-commit.
+.claude/settings.local.json
