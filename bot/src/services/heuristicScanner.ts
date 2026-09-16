@@ -65,6 +65,7 @@ const RULES: Rule[] = [
         'giveaway', 'give away', 'giveway', 'free giveaway', 'airdrop', 'air drop',
         'claim your', 'claim now', 'claim reward', 'claim your prize', 'you won',
         'you have won', 'you have been selected', 'congratulations you', 'lucky winner',
+        'giving away', 'i am giving', 'to everyone who', 'claim your reward', 'receive your',
         'free nitro', 'discord nitro free', 'free robux', 'free vbucks', 'free v bucks',
         'free skin', 'free gift', 'gift card', 'steam gift', 'free steam',
         'klaim hadiah', 'klaim sekarang', 'hadiah gratis', 'menangkan', 'pemenang',
@@ -100,6 +101,22 @@ const RULES: Rule[] = [
       ),
       /\b(bitcoin|btc|ethereum|eth|dogecoin|doge)\b/i,
     ],
+  },
+  {
+    // Pola "casino crypto milik selebriti": bonus besar yang katanya bisa
+    // langsung ditarik asal daftar pakai kode promo — korban diminta deposit
+    // dulu saat mau withdraw.
+    id: 'casino_bonus',
+    label: 'Bonus casino / kode promo',
+    weight: 4,
+    target: 'norm',
+    patterns: phrases(
+      'promo code', 'promocode', 'bonus code', 'referral code', 'use code', 'enter code',
+      'withdraw the bonus', 'withdraw your', 'play or withdraw', 'casino', 'cryptocurrency',
+      'crypto project', 'deposit bonus', 'welcome bonus', 'no deposit',
+      'kode promo', 'kode bonus', 'kode referral', 'bonus deposit', 'bisa langsung ditarik',
+      'bisa di wd', 'langsung wd', 'slot gacor',
+    ),
   },
   {
     id: 'credential',
@@ -138,7 +155,8 @@ const RULES: Rule[] = [
         'limited time', 'limited offer', 'hurry', 'last chance', 'only today',
         'expires soon', 'ends today', 'act now', 'first 100', 'first 1000',
         'buruan', 'terbatas', 'segera', 'sebelum kehabisan', 'hanya hari ini',
-        'kuota terbatas',
+        'kuota terbatas', 'will be deleted', 'be deleted', 'only the fastest', 'first come',
+        'don t miss', 'dont miss', 'before it s gone', 'akan dihapus', 'siapa cepat',
       ),
       /\bexpires?\s+in\s+\d/i,
       /\bdalam\s+\d+\s*(jam|menit|hari)\b/i,
@@ -150,7 +168,7 @@ const RULES: Rule[] = [
     weight: 2,
     target: 'raw',
     patterns: [
-      /\$\s?\d{2,3}(?:[.,]\d{3})+/,
+      /\$\s?\d{1,3}(?:[.,]\d{3})+/,
       /\$\s?\d{3,}/,
       /\brp\.?\s?\d{1,3}(?:[.,]\d{3})+/i,
       /\b\d+\s?(juta|jt|million|billion|miliar)\b/i,
@@ -177,6 +195,8 @@ const RULES: Rule[] = [
 export function normalizeForHeuristics(text: string): string {
   return text
     .toLowerCase()
+    // `@` di awal handle (`@mrbeast`) adalah pemisah, bukan huruf samaran.
+    .replace(/(^|[^a-z0-9])@/g, '$1 ')
     .replace(/[@4]/g, 'a')
     .replace(/[0]/g, 'o')
     .replace(/[1|!]/g, 'i')

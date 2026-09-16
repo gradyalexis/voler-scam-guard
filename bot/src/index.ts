@@ -1,8 +1,9 @@
 import { Client, GatewayIntentBits, Partials, REST, Routes } from 'discord.js';
-import { commands } from './commands/index.js';
 import { config } from './config.js';
+import { describeAiTargets } from './services/aiReview.js';
 import { closeDatabase, waitForDatabase } from './db/client.js';
 import { events } from './events/index.js';
+import { startHealthServer, stopHealthServer } from './health.js';
 import { initOcr, shutdownOcr } from './services/ocrScanner.js';
 import { pruneUrlCache } from './services/urlScanner.js';
 import { createLogger } from './util/logger.js';
@@ -35,29 +36,35 @@ client.rest.on('rateLimited', (info) =>
   log.warn(`Kena rate limit: ${info.route} (${info.timeToReset}ms)`),
 );
 
-/** Daftarkan slash command secara global saat startup. */
-async function registerCommands(): Promise<void> {
+/**
+ * Bot tidak punya slash command lagi — semua pengaturan lewat dashboard. Hapus
+ * command yang masih terdaftar dari versi lama supaya tidak muncul di Discord.
+ */
+async function clearSlashCommands(): Promise<void> {
   const rest = new REST({ version: '10' }).setToken(config.discord.token);
   try {
-    await rest.put(Routes.applicationCommands(config.discord.clientId), {
-      body: commands.map((c) => c.data),
-    });
-    log.info(`${commands.length} slash command terdaftar`);
+    await rest.put(Routes.applicationCommands(config.discord.clientId), { body: [] });
   } catch (err) {
-    log.error('Gagal mendaftarkan slash command', err);
+    log.warn('Gagal menghapus slash command lama', err);
   }
 }
 
 let pruneTimer: NodeJS.Timeout | undefined;
+let healthServer: ReturnType<typeof startHealthServer>;
 
 async function main(): Promise<void> {
   log.info('Voler Scam Guard starting…');
   if (!config.safeBrowsing.enabled) {
     log.warn('GOOGLE_SAFE_BROWSING_API_KEY kosong — deteksi URL hanya pakai blacklist lokal');
   }
+  if (config.ai.enabled) {
+    log.info(`Review gambar AI aktif: ${describeAiTargets()}`);
+  } else {
+    log.info('GEMINI_API_KEY, GROQ_API_KEY, dan OPENROUTER_API_KEY kosong — review gambar AI dimatikan');
+  }
 
   await waitForDatabase();
-  await registerCommands();
+  await clearSlashCommands();
 
   // OCR di-warm-up di background: download traineddata bisa makan waktu dan
   // tidak boleh menahan bot online.
@@ -73,6 +80,8 @@ async function main(): Promise<void> {
     6 * 60 * 60 * 1000,
   );
   pruneTimer.unref();
+
+  healthServer = startHealthServer(client);
 
   await client.login(config.discord.token);
 }
@@ -92,6 +101,7 @@ async function shutdown(signal: string): Promise<void> {
   timeout.unref();
 
   try {
+    await stopHealthServer(healthServer);
     await shutdownOcr();
     client.destroy();
     await closeDatabase();

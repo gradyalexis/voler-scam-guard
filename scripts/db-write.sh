@@ -8,13 +8,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-# shellcheck disable=SC1091
-set -a; source .env; set +a
+# shellcheck source=lib/db.sh
+source scripts/lib/db.sh
 
 if [ $# -gt 0 ]; then
-  docker compose exec -T postgres \
-    psql -U "$DB_USER" -d "${DB_NAME:-voler_scam_guard}" -v ON_ERROR_STOP=1 -c "$*"
+  db_psql -v ON_ERROR_STOP=1 -c "$*"
 else
-  docker compose exec -T postgres \
-    psql -U "$DB_USER" -d "${DB_NAME:-voler_scam_guard}" -v ON_ERROR_STOP=1
+  db_psql -v ON_ERROR_STOP=1
 fi

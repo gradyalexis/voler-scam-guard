@@ -1,16 +1,13 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, notInArray } from 'drizzle-orm';
 import { config } from '../config.js';
 import { db } from '../db/client.js';
 import { guildSettings, type GuildSetting } from '../db/schema.js';
-import { createLogger } from '../util/logger.js';
 import { DEFAULT_THRESHOLD } from './heuristicScanner.js';
-
-const log = createLogger('settings');
 
 /** Setting jarang berubah tapi dibaca tiap pesan, jadi di-cache pendek. */
 const CACHE_TTL_MS = 30_000;
 
-export type BotMode = 'auto_delete' | 'warn' | 'flag_only' | 'off';
+export type BotMode = 'auto_delete' | 'warn_delete' | 'warn' | 'flag_only' | 'off';
 /** Di mana heuristik pola scam dijalankan: mati, hanya gambar, atau gambar + teks. */
 export type HeuristicMode = 'off' | 'images' | 'all';
 
@@ -23,6 +20,7 @@ export interface EffectiveSettings {
   logCleanMessages: boolean;
   heuristicMode: HeuristicMode;
   heuristicThreshold: number;
+  useAiReview: boolean;
   modLogChannelId: string | null;
   reportChannelId: string | null;
   scannedChannelIds: string[];
@@ -42,6 +40,7 @@ function fromRow(guildId: string, row: GuildSetting | undefined): EffectiveSetti
     logCleanMessages: row?.logCleanMessages ?? false,
     heuristicMode: (row?.heuristicMode as HeuristicMode | undefined) ?? 'images',
     heuristicThreshold: row?.heuristicThreshold ?? DEFAULT_THRESHOLD,
+    useAiReview: row?.useAiReview ?? false,
     modLogChannelId: row?.modLogChannelId ?? null,
     reportChannelId: row?.reportChannelId ?? null,
     scannedChannelIds: row?.scannedChannelIds ?? [],
@@ -71,31 +70,45 @@ export function invalidateSettings(guildId?: string): void {
 }
 
 /** Pastikan guild punya baris setting — dipanggil saat bot join / startup. */
-export async function ensureGuildRow(guildId: string, guildName: string): Promise<void> {
+export async function ensureGuildRow(
+  guildId: string,
+  guildName: string,
+  guildIcon: string | null,
+): Promise<void> {
   await db
     .insert(guildSettings)
-    .values({ guildId, guildName, mode: config.defaults.mode })
+    .values({ guildId, guildName, guildIcon, mode: config.defaults.mode, botPresent: true })
     .onConflictDoUpdate({
       target: guildSettings.guildId,
-      set: { guildName },
+      set: { guildName, guildIcon, botPresent: true },
     });
   invalidateSettings(guildId);
 }
 
-export async function updateSettings(
-  guildId: string,
-  patch: Partial<Omit<EffectiveSettings, 'guildId'>>,
-): Promise<EffectiveSettings> {
+/** Bot dikeluarkan dari server. Setting disimpan untuk kalau bot dipasang lagi. */
+export async function markGuildLeft(guildId: string): Promise<void> {
   await db
-    .insert(guildSettings)
-    .values({ guildId, ...patch, updatedAt: new Date() })
-    .onConflictDoUpdate({
-      target: guildSettings.guildId,
-      set: { ...patch, updatedAt: new Date() },
-    });
+    .update(guildSettings)
+    .set({ botPresent: false })
+    .where(eq(guildSettings.guildId, guildId));
   invalidateSettings(guildId);
-  log.info(`Setting guild ${guildId} diperbarui: ${Object.keys(patch).join(', ')}`);
-  return getSettings(guildId);
+}
+
+/**
+ * Tandai server yang tidak lagi berisi bot — dipanggil saat startup, karena bot
+ * bisa dikeluarkan ketika sedang offline sehingga guildDelete tidak pernah diterima.
+ */
+export async function markMissingGuildsLeft(presentGuildIds: string[]): Promise<number> {
+  const conditions = [eq(guildSettings.botPresent, true)];
+  if (presentGuildIds.length > 0) {
+    conditions.push(notInArray(guildSettings.guildId, presentGuildIds));
+  }
+  const rows = await db
+    .update(guildSettings)
+    .set({ botPresent: false })
+    .where(and(...conditions))
+    .returning({ guildId: guildSettings.guildId });
+  return rows.length;
 }
 
 /**

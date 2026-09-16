@@ -1,12 +1,15 @@
 services:
+  # Postgres lokal, hanya jalan kalau profile `local-db` aktif (set
+  # COMPOSE_PROFILES=local-db di .env). Dengan Supabase service ini tidak dibuat.
   postgres:
     image: postgres:16-alpine
     container_name: vsg-postgres
     restart: always
+    profiles: [local-db]
     environment:
       POSTGRES_DB: ${DB_NAME:-voler_scam_guard}
-      POSTGRES_USER: ${DB_USER:?DB_USER wajib diisi di .env}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD wajib diisi di .env}
+      POSTGRES_USER: ${DB_USER:-vsg}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-}
     ports:
       # Sengaja diikat ke loopback: cukup untuk psql dan menjalankan bot/dashboard
       # dari luar container saat development, tapi tidak terbuka ke internet.
@@ -16,7 +19,7 @@ services:
       # Skrip di sini hanya jalan saat volume pgdata masih kosong.
       - ./db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME:-voler_scam_guard}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-vsg} -d ${DB_NAME:-voler_scam_guard}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -29,53 +32,27 @@ services:
     init: true
     env_file: .env
     environment:
-      DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-voler_scam_guard}
+      # Supabase: DATABASE_URL dari .env. Postgres lokal: COMPOSE_DATABASE_URL (host `postgres`).
+      DATABASE_URL: ${COMPOSE_DATABASE_URL:-${DATABASE_URL:?DATABASE_URL wajib diisi di .env}}
       TESSDATA_PATH: /app/tessdata
+    ports:
+      # Endpoint health bot: curl http://localhost:9000/health
+      # Diikat ke loopback — tidak ada alasan endpoint ini terbuka ke internet.
+      # Hapus prefix 127.0.0.1: kalau mau diakses dari mesin lain.
+      - "127.0.0.1:9000:9000"
     volumes:
       - tessdata:/app/tessdata
+      # CA cert Supabase. DATABASE_SSL_CA_FILE relatif ke root project (= /app di container).
+      - ./certs:/app/certs:ro
     depends_on:
       postgres:
         condition: service_healthy
-    networks: [vsg]
-
-  dashboard:
-    build: ./dashboard
-    container_name: vsg-dashboard
-    restart: always
-    init: true
-    env_file: .env
-    environment:
-      DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-voler_scam_guard}
-    expose:
-      - "3000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks: [vsg]
-
-  caddy:
-    image: caddy:2-alpine
-    container_name: vsg-caddy
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN:?DASHBOARD_DOMAIN wajib diisi di .env}
-      ACME_EMAIL: ${ACME_EMAIL:-}
-    volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - dashboard
+        required: false
     networks: [vsg]
 
 volumes:
   pgdata:
   tessdata:
-  caddy_data:
-  caddy_config:
 
 networks:
   vsg:

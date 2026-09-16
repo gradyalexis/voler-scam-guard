@@ -8,6 +8,7 @@ import {
 import { db } from '../db/client.js';
 import { detectionLogs } from '../db/schema.js';
 import { createLogger } from '../util/logger.js';
+import { codeBlock, inlineCode, plainText } from '../util/discordText.js';
 import { truncate } from '../util/text.js';
 import type { Finding, ScanOutcome } from './detector.js';
 import type { EffectiveSettings } from './settings.js';
@@ -69,6 +70,27 @@ async function performAction(
       return 'flagged_only';
     }
 
+    case 'warn_delete': {
+      // Temuan non-high tidak dihapus, sama seperti auto_delete: heuristik
+      // berskor sedang terlalu sering salah tebak untuk menghapus pesan orang.
+      if (!hasHighSeverity) {
+        const warned = await warnInChannel(message, findings);
+        return warned ? 'warned' : 'flagged_only';
+      }
+
+      // Hapus dulu, baru umumkan — kalau penghapusan gagal (izin kurang),
+      // pengumumannya tidak terlanjur bilang pesannya sudah hilang.
+      const deleted = await deleteMessage(message);
+      if (!deleted) {
+        const warned = await warnInChannel(message, findings);
+        return warned ? 'warned' : 'flagged_only';
+      }
+
+      await announceRemoval(message, findings);
+      await notifyUser(message, findings);
+      return 'deleted';
+    }
+
     case 'warn': {
       const warned = await warnInChannel(message, findings);
       return warned ? 'warned' : 'flagged_only';
@@ -103,13 +125,13 @@ async function notifyUser(message: Message, findings: Finding[]): Promise<void> 
       embeds: [
         new EmbedBuilder()
           .setColor(SEVERITY_COLOR.high!)
-          .setTitle('Pesan kamu dihapus oleh Voler Scam Guard')
+          .setTitle('Pesan kamu dihapus oleh Scam Guard')
           .setDescription(
             [
               `Pesan kamu di **${message.guild?.name ?? 'server'}** terdeteksi mengandung indikasi scam.`,
               '',
-              `**Terdeteksi:** \`${truncate(first.matchedValue, 120)}\``,
-              first.detail ? `**Alasan:** ${truncate(first.detail, 300)}` : '',
+              `**Terdeteksi:** ${inlineCode(first.matchedValue, 120)}`,
+              first.detail ? `**Alasan:** ${plainText(first.detail, 300)}` : '',
               '',
               'Kalau ini salah deteksi, hubungi moderator server.',
             ]
@@ -135,8 +157,8 @@ async function warnInChannel(message: Message, findings: Finding[]): Promise<boo
           .setTitle('⚠️ Peringatan scam')
           .setDescription(
             [
-              `Pesan ini terdeteksi mengandung indikasi scam: \`${truncate(first.matchedValue, 120)}\``,
-              first.detail ? `_${truncate(first.detail, 300)}_` : '',
+              `Pesan ini terdeteksi mengandung indikasi scam: ${inlineCode(first.matchedValue, 120)}`,
+              first.detail ? `_${plainText(first.detail, 300)}_` : '',
               '',
               'Jangan lakukan transaksi sebelum diverifikasi moderator.',
             ]
@@ -149,6 +171,46 @@ async function warnInChannel(message: Message, findings: Finding[]): Promise<boo
     return true;
   } catch (err) {
     log.warn('Gagal mengirim peringatan di channel', err);
+    return false;
+  }
+}
+
+/**
+ * Umumkan di channel setelah pesannya dihapus (mode warn_delete). Sengaja bukan
+ * reply: pesan yang dirujuk sudah tidak ada, dan Discord akan menampilkannya
+ * sebagai balasan ke pesan terhapus. Penulisnya disebut lewat mention supaya
+ * konteksnya jelas, tapi tanpa ping — tidak perlu menarik perhatian ke pelaku.
+ */
+async function announceRemoval(message: Message, findings: Finding[]): Promise<boolean> {
+  const first = findings[0];
+  if (!first) return false;
+  if (!message.channel.isSendable()) return false;
+
+  try {
+    await message.channel.send({
+      content: `Pesan dari ${message.author} dihapus oleh Scam Guard.`,
+      embeds: [
+        new EmbedBuilder()
+          .setColor(SEVERITY_COLOR.high!)
+          .setTitle('🛡️ Pesan scam dihapus')
+          .setDescription(
+            [
+              `**Terdeteksi:** ${inlineCode(first.matchedValue, 120)}`,
+              first.detail ? `_${plainText(first.detail, 300)}_` : '',
+              '',
+              'Jangan lanjutkan transaksi apa pun dari pesan tersebut.',
+            ]
+              .filter(Boolean)
+              .join('\n'),
+          )
+          .setTimestamp(),
+      ],
+      // Mention tetap tampil sebagai nama, tapi tidak mengirim notifikasi.
+      allowedMentions: { users: [] },
+    });
+    return true;
+  } catch (err) {
+    log.warn('Gagal mengumumkan penghapusan di channel', err);
     return false;
   }
 }
@@ -179,20 +241,24 @@ async function sendModLog(
           .slice(0, 5)
           .map(
             (f) =>
-              `• \`${truncate(f.matchedValue, 80)}\` — ${f.detectionType}/${f.source}${
-                f.detail ? ` — ${truncate(f.detail, 100)}` : ''
+              `• ${inlineCode(f.matchedValue, 80)} — ${f.detectionType}/${f.source}${
+                f.modNote ? ` (${f.modNote})` : ''
+              }${
+                f.detail ? ` — ${plainText(f.detail, 100)}` : ''
               }`,
           )
-          .join('\n'),
+          .join('\n')
+          // Batas field embed Discord 1024 karakter; escape markdown menambah panjang.
+          .slice(0, 1024),
       },
     )
     .setTimestamp(message.createdAt);
 
   if (message.content.trim()) {
-    embed.addFields({ name: 'Isi pesan', value: truncate(message.content, 1000) });
+    embed.addFields({ name: 'Isi pesan', value: codeBlock(message.content, 1000) });
   }
   if (outcome.ocrText) {
-    embed.addFields({ name: 'Teks hasil OCR', value: truncate(outcome.ocrText, 800) });
+    embed.addFields({ name: 'Teks hasil OCR', value: codeBlock(outcome.ocrText, 800) });
   }
   if (action !== 'deleted') {
     embed.addFields({ name: 'Link pesan', value: message.url });

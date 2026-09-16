@@ -16,7 +16,8 @@ const REQUEST_TIMEOUT_MS = 5000;
 /** Safe Browsing menerima maksimum 500 URL per request. */
 const MAX_URLS_PER_REQUEST = 500;
 
-export type UrlVerdictSource = 'blacklist' | 'safe_browsing';
+/** 'heuristic' = link disamarkan, langsung dianggap berbahaya tanpa Safe Browsing. */
+export type UrlVerdictSource = 'blacklist' | 'safe_browsing' | 'heuristic';
 
 export interface UrlThreat {
   url: string;
@@ -40,11 +41,15 @@ function hashUrl(url: string): string {
 
 /**
  * Scan teks: ekstrak URL -> buang yang whitelisted -> cek blacklist lokal ->
- * sisanya baru ditanyakan ke Google Safe Browsing (dengan cache di DB).
+ * link yang disamarkan langsung jadi ancaman -> sisanya baru ditanyakan ke
+ * Google Safe Browsing (dengan cache di DB).
+ *
+ * `flagObfuscated` sengaja dimatikan untuk teks OCR: di sana `,` / spasi di
+ * sekitar titik biasanya salah baca OCR, bukan niat menyamarkan link.
  */
 export async function scanText(
   text: string,
-  opts: { useSafeBrowsing?: boolean } = {},
+  opts: { useSafeBrowsing?: boolean; guildId?: string | null; flagObfuscated?: boolean } = {},
 ): Promise<UrlScanResult> {
   const found = extractUrls(text);
   const result: UrlScanResult = { found, whitelisted: [], threats: [] };
@@ -52,7 +57,7 @@ export async function scanText(
 
   const candidates: ExtractedUrl[] = [];
   for (const item of found) {
-    if (await isWhitelisted(item.domain)) {
+    if (await isWhitelisted(item.domain, opts.guildId)) {
       result.whitelisted.push(item);
       continue;
     }
@@ -69,7 +74,18 @@ export async function scanText(
         url: item.url,
         domain: hit.domain,
         source: 'blacklist',
-        detail: hit.reason,
+        detail: hit.viaLeet
+          ? `${hit.reason ?? 'Domain blacklist'} (ditulis sebagai ${item.domain})`
+          : hit.reason,
+      });
+    } else if (opts.flagObfuscated && item.obfuscation) {
+      // Orang yang sengaja menyamarkan link sedang menghindari filter — tidak
+      // perlu menunggu Safe Browsing (yang juga belum tentu kenal domain baru).
+      result.threats.push({
+        url: item.url,
+        domain: item.domain,
+        source: 'heuristic',
+        detail: `Link disamarkan (${item.obfuscation})`,
       });
     } else {
       remaining.push(item);

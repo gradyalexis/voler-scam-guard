@@ -1,12 +1,18 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import {
   blacklistAccounts,
   blacklistDomains,
+  guildWhitelistDomains,
   whitelistDomains,
 } from '../db/schema.js';
 import { createLogger } from '../util/logger.js';
-import { digitsOnly, domainVariants, normalizeIdentifier } from '../util/text.js';
+import {
+  deleetDomainVariants,
+  digitsOnly,
+  domainVariants,
+  normalizeIdentifier,
+} from '../util/text.js';
 
 const log = createLogger('blacklist');
 
@@ -23,6 +29,8 @@ interface AccountEntry {
 
 interface CacheShape {
   whitelist: Set<string>;
+  /** guildId -> domain yang di-whitelist khusus server itu. */
+  guildWhitelist: Map<string, Set<string>>;
   domains: Map<string, { reason: string | null; addedBy: string | null }>;
   accounts: AccountEntry[];
   loadedAt: number;
@@ -32,8 +40,11 @@ let cache: CacheShape | null = null;
 let inflight: Promise<CacheShape> | null = null;
 
 async function loadCache(): Promise<CacheShape> {
-  const [wl, bl, accounts] = await Promise.all([
+  const [wl, guildWl, bl, accounts] = await Promise.all([
     db.select({ domain: whitelistDomains.domain }).from(whitelistDomains),
+    db
+      .select({ guildId: guildWhitelistDomains.guildId, domain: guildWhitelistDomains.domain })
+      .from(guildWhitelistDomains),
     db
       .select({
         domain: blacklistDomains.domain,
@@ -53,8 +64,16 @@ async function loadCache(): Promise<CacheShape> {
       .where(eq(blacklistAccounts.status, 'verified')),
   ]);
 
+  const guildWhitelist = new Map<string, Set<string>>();
+  for (const row of guildWl) {
+    let set = guildWhitelist.get(row.guildId);
+    if (!set) guildWhitelist.set(row.guildId, (set = new Set()));
+    set.add(row.domain.toLowerCase());
+  }
+
   const next: CacheShape = {
     whitelist: new Set(wl.map((r) => r.domain.toLowerCase())),
+    guildWhitelist,
     domains: new Map(
       bl.map((r) => [r.domain.toLowerCase(), { reason: r.reason, addedBy: r.addedBy }]),
     ),
@@ -82,23 +101,40 @@ export function invalidateBlacklistCache(): void {
   cache = null;
 }
 
-export async function isWhitelisted(domain: string): Promise<boolean> {
-  const { whitelist } = await getCache();
-  return domainVariants(domain).some((v) => whitelist.has(v));
+/** Whitelist global berlaku di semua server; whitelist server hanya di server itu. */
+export async function isWhitelisted(domain: string, guildId?: string | null): Promise<boolean> {
+  const { whitelist, guildWhitelist } = await getCache();
+  const guildSet = guildId ? guildWhitelist.get(guildId) : undefined;
+  return domainVariants(domain).some((v) => whitelist.has(v) || Boolean(guildSet?.has(v)));
 }
 
 export interface DomainHit {
   domain: string;
   reason: string | null;
   addedBy: string | null;
+  /** True kalau cocoknya lewat versi tanpa angka samaran (`s0akw1n.com`). */
+  viaLeet: boolean;
 }
 
-/** Cek domain (dan semua parent domain-nya) terhadap blacklist. */
+/**
+ * Cek domain (dan semua parent domain-nya) terhadap blacklist. Kalau domain
+ * aslinya tidak cocok, versi dengan angka dikembalikan ke huruf juga dicoba.
+ */
 export async function checkDomainBlacklist(domain: string): Promise<DomainHit | null> {
   const { domains } = await getCache();
-  for (const variant of domainVariants(domain)) {
-    const hit = domains.get(variant);
-    if (hit) return { domain: variant, reason: hit.reason, addedBy: hit.addedBy };
+  const candidates = [domain, ...deleetDomainVariants(domain)];
+  for (const candidate of candidates) {
+    for (const variant of domainVariants(candidate)) {
+      const hit = domains.get(variant);
+      if (hit) {
+        return {
+          domain: variant,
+          reason: hit.reason,
+          addedBy: hit.addedBy,
+          viaLeet: candidate !== domain,
+        };
+      }
+    }
   }
   return null;
 }
@@ -146,54 +182,8 @@ export async function findBlacklistedAccounts(text: string): Promise<AccountHit[
 }
 
 // ---------------------------------------------------------------------------
-// Mutasi (dipakai slash command)
+// Laporan dari channel report. Blacklist & whitelist diubah lewat dashboard.
 // ---------------------------------------------------------------------------
-
-export async function addBlacklistDomain(
-  domain: string,
-  reason: string | null,
-  addedBy: string,
-): Promise<{ created: boolean }> {
-  const result = await db
-    .insert(blacklistDomains)
-    .values({ domain: domain.toLowerCase(), reason, addedBy })
-    .onConflictDoNothing({ target: blacklistDomains.domain })
-    .returning({ id: blacklistDomains.id });
-  invalidateBlacklistCache();
-  return { created: result.length > 0 };
-}
-
-export async function removeBlacklistDomain(domain: string): Promise<boolean> {
-  const result = await db
-    .delete(blacklistDomains)
-    .where(eq(blacklistDomains.domain, domain.toLowerCase()))
-    .returning({ id: blacklistDomains.id });
-  invalidateBlacklistCache();
-  return result.length > 0;
-}
-
-export async function addWhitelistDomain(
-  domain: string,
-  note: string | null,
-  addedBy: string,
-): Promise<{ created: boolean }> {
-  const result = await db
-    .insert(whitelistDomains)
-    .values({ domain: domain.toLowerCase(), note, addedBy })
-    .onConflictDoNothing({ target: whitelistDomains.domain })
-    .returning({ id: whitelistDomains.id });
-  invalidateBlacklistCache();
-  return { created: result.length > 0 };
-}
-
-export async function removeWhitelistDomain(domain: string): Promise<boolean> {
-  const result = await db
-    .delete(whitelistDomains)
-    .where(eq(whitelistDomains.domain, domain.toLowerCase()))
-    .returning({ id: whitelistDomains.id });
-  invalidateBlacklistCache();
-  return result.length > 0;
-}
 
 export interface ReportAccountInput {
   accountType: string;
@@ -201,7 +191,6 @@ export interface ReportAccountInput {
   reason: string | null;
   evidenceUrl: string | null;
   reportedBy: string;
-  /** Laporan dari moderator bisa langsung `verified`. */
   status?: 'pending' | 'verified';
 }
 
@@ -230,66 +219,4 @@ export async function reportAccount(
   invalidateBlacklistCache();
   const row = result[0];
   return { id: row?.id ?? null, created: Boolean(row) };
-}
-
-export async function setAccountStatus(
-  id: number,
-  status: 'pending' | 'verified' | 'rejected',
-  reviewedBy: string,
-): Promise<boolean> {
-  const result = await db
-    .update(blacklistAccounts)
-    .set({ status, reviewedBy, reviewedAt: new Date() })
-    .where(eq(blacklistAccounts.id, id))
-    .returning({ id: blacklistAccounts.id });
-  invalidateBlacklistCache();
-  return result.length > 0;
-}
-
-export async function lookupAccount(identifier: string): Promise<AccountHit[]> {
-  const norm = normalizeIdentifier(identifier);
-  if (!norm) return [];
-  const rows = await db
-    .select({
-      id: blacklistAccounts.id,
-      accountType: blacklistAccounts.accountType,
-      identifier: blacklistAccounts.identifier,
-      reason: blacklistAccounts.reason,
-      status: blacklistAccounts.status,
-    })
-    .from(blacklistAccounts)
-    .where(
-      and(
-        eq(blacklistAccounts.identifierNorm, norm),
-        inArray(blacklistAccounts.status, ['pending', 'verified']),
-      ),
-    );
-  return rows;
-}
-
-export async function blacklistStats(): Promise<{
-  domains: number;
-  accountsVerified: number;
-  accountsPending: number;
-  whitelist: number;
-}> {
-  const [row] = await db.execute<{
-    domains: string;
-    accounts_verified: string;
-    accounts_pending: string;
-    whitelist: string;
-  }>(sql`
-    SELECT
-      (SELECT count(*) FROM blacklist_domains)                                   AS domains,
-      (SELECT count(*) FROM blacklist_accounts WHERE status = 'verified')        AS accounts_verified,
-      (SELECT count(*) FROM blacklist_accounts WHERE status = 'pending')         AS accounts_pending,
-      (SELECT count(*) FROM whitelist_domains)                                   AS whitelist
-  `).then((r) => (Array.isArray(r) ? r : r.rows));
-
-  return {
-    domains: Number(row?.domains ?? 0),
-    accountsVerified: Number(row?.accounts_verified ?? 0),
-    accountsPending: Number(row?.accounts_pending ?? 0),
-    whitelist: Number(row?.whitelist ?? 0),
-  };
 }

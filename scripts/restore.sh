@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Restore database dari file backup: scripts/restore.sh backups/xxx.sql.gz
+# Ke project/database baru: jalankan dulu ./scripts/migrate.sh dan
+# ./scripts/create-readonly-role.sh supaya role vsg_ro dan pengaman RLS sudah ada.
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
@@ -10,14 +12,17 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-# shellcheck disable=SC1091
-set -a; source .env; set +a
+# shellcheck source=lib/db.sh
+source scripts/lib/db.sh
 
-echo "Ini akan MENIMPA isi database ${DB_NAME:-voler_scam_guard}."
+echo "Ini akan MENIMPA isi database: $(db_target)."
 read -r -p "Ketik 'ya' untuk lanjut: " confirm
 [ "$confirm" = "ya" ] || { echo "Dibatalkan."; exit 1; }
 
-gunzip -c "$1" | docker compose exec -T postgres \
-  psql -U "$DB_USER" -d "${DB_NAME:-voler_scam_guard}"
+# Satu transaksi: kalau ada error di tengah, database tidak ditinggal setengah terhapus.
+gunzip -c "$1" | db_psql -v ON_ERROR_STOP=1 --single-transaction
 
-echo "Restore selesai. Restart service: docker compose restart bot dashboard"
+# Pastikan tabel hasil restore tetap tertutup dari Data API Supabase.
+db_psql -v ON_ERROR_STOP=1 -q < db/init/004_supabase_rls.sql
+
+echo "Restore selesai. Restart bot (docker compose restart bot) dan dashboard di repo-nya."

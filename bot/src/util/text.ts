@@ -11,17 +11,97 @@ const NOT_A_TLD = new Set([
 ]);
 
 /**
- * Un-obfuscate trik umum penyebar link scam supaya tetap kebaca sebagai URL:
- * `hxxp://`, `example[.]com`, `example (dot) com`.
+ * TLD yang boleh dipakai bentuk samaran "longgar" — titik diberi spasi, diganti
+ * koma, atau ditulis `dot`/`titik` tanpa kurung. Sengaja hanya TLD yang bukan
+ * kata/singkatan chat sehari-hari: `net` (internet), `tk` (taman kanak-kanak),
+ * `gg`, `me`, `id`, dll. akan mengubah obrolan biasa jadi "link disamarkan".
+ */
+const LOOSE_TLDS = ['com', 'org', 'xyz', 'io', 'ru', 'biz', 'cn', 'sbs', 'cfd', 'cyou'];
+
+/** gTLD yang lazim dipakai link scam, selain ccTLD dua huruf. */
+const KNOWN_GTLDS = new Set([
+  'com', 'net', 'org', 'info', 'biz', 'xyz', 'top', 'site', 'online', 'store', 'shop',
+  'club', 'live', 'app', 'dev', 'pro', 'vip', 'win', 'bet', 'casino', 'games', 'lol',
+  'fun', 'icu', 'sbs', 'cfd', 'cyou', 'bond', 'click', 'link', 'space', 'website',
+  'tech', 'cloud', 'one', 'best', 'life', 'world', 'today', 'news', 'blog', 'asia',
+  'gift', 'gifts', 'money', 'finance', 'exchange', 'digital', 'network', 'center',
+]);
+
+/** Karakter tak terlihat yang disisipkan supaya domain tidak cocok dengan filter. */
+const INVISIBLE_RE = /[\u00AD\u200B-\u200F\u2060-\u2064\uFEFF]/g;
+
+/** Titik "palsu" yang tidak dinormalisasi NFKC. */
+const DOT_LOOKALIKE_RE = /[\u3002\u00B7\u2219\u22C5\u30FB]/g;
+
+/** Huruf Kiril/Yunani yang bentuknya identik dengan huruf Latin. */
+const HOMOGLYPHS: Record<string, string> = {
+  а: 'a', в: 'b', е: 'e', к: 'k', м: 'm', н: 'h', о: 'o', р: 'p', с: 'c', т: 't',
+  у: 'y', х: 'x', і: 'i', ј: 'j', ѕ: 's', ԁ: 'd', ԛ: 'q', ԝ: 'w', һ: 'h', ӏ: 'l',
+  А: 'A', В: 'B', Е: 'E', К: 'K', М: 'M', Н: 'H', О: 'O', Р: 'P', С: 'C', Т: 'T',
+  Х: 'X', Ү: 'Y', І: 'I', Ј: 'J', Ѕ: 'S',
+  α: 'a', ε: 'e', ι: 'i', κ: 'k', ν: 'v', ο: 'o', ρ: 'p', τ: 't', υ: 'u', χ: 'x',
+  Α: 'A', Β: 'B', Ε: 'E', Ζ: 'Z', Η: 'H', Ι: 'I', Κ: 'K', Μ: 'M', Ν: 'N', Ο: 'O',
+  Ρ: 'P', Τ: 'T', Υ: 'Y', Χ: 'X',
+};
+const HOMOGLYPH_RE = new RegExp(`[${Object.keys(HOMOGLYPHS).join('')}]`, 'g');
+
+interface Deobfuscated {
+  text: string;
+  /** Nama trik yang terdeteksi, untuk ditampilkan di mod-log. */
+  tricks: string[];
+}
+
+/**
+ * Un-obfuscate trik penyebar link scam supaya tetap kebaca sebagai URL:
+ * `hxxp://`, `example[.]com`, `example (dot) com`, `example , com`, huruf
+ * fullwidth / Kiril yang mirip Latin, titik Unicode, karakter tak terlihat,
+ * dan TLD berangka (`.c0m`).
  */
 export function deobfuscate(input: string): string {
-  return input
-    .replace(/\bh(?:xx|tt)ps?(?::\/\/|:\/\/|\[:\/\/\])/gi, (m) =>
-      m.toLowerCase().startsWith('hxx') ? 'http://' : m,
-    )
-    .replace(/\s*[[({<]\s*\.\s*[\])}>]\s*/g, '.')
-    .replace(/\s*[[({<]?\s*(?:dot|titik)\s*[\])}>]?\s*/gi, '.')
-    .replace(/\s*[[({<]\s*(?::\/\/)\s*[\])}>]\s*/g, '://');
+  return deobfuscateWithTricks(input).text;
+}
+
+function deobfuscateWithTricks(input: string): Deobfuscated {
+  const tricks: string[] = [];
+  let text = input;
+  const step = (name: string, fn: (t: string) => string) => {
+    const next = fn(text);
+    if (next !== text) {
+      tricks.push(name);
+      text = next;
+    }
+  };
+  const loose = LOOSE_TLDS.join('|');
+
+  step('karakter tak terlihat', (t) => t.replace(INVISIBLE_RE, ''));
+  // NFKC: huruf fullwidth (ｓｏａｋ) dan titik varian (．․﹒) jadi ASCII biasa.
+  step('karakter Unicode mirip huruf/titik', (t) =>
+    t.normalize('NFKC').replace(DOT_LOOKALIKE_RE, '.'),
+  );
+  // Homoglyph hanya diganti di token campuran Latin + non-Latin, supaya kalimat
+  // berbahasa Rusia/Yunani utuh tidak ikut berubah.
+  step('huruf Kiril/Yunani mirip Latin', (t) =>
+    t.replace(/[\p{L}\p{N}.-]+/gu, (token) =>
+      /[a-z]/i.test(token) ? token.replace(HOMOGLYPH_RE, (c) => HOMOGLYPHS[c] ?? c) : token,
+    ),
+  );
+  step('hxxp', (t) => t.replace(/\bhxxp(s?)(?::\/\/|\[:\/\/\])/gi, 'http$1://'));
+  step('titik dalam kurung', (t) =>
+    t
+      .replace(/\s*[[({<]\s*(?:\.|dot|titik)\s*[\])}>]\s*/gi, '.')
+      .replace(/\s*[[({<]\s*(?::\/\/)\s*[\])}>]\s*/g, '://'),
+  );
+  step('titik ditulis dot/titik', (t) =>
+    t.replace(new RegExp(`([a-z0-9])\\s+(?:dot|titik)\\s+(${loose})\\b`, 'gi'), '$1.$2'),
+  );
+  step('titik diberi spasi / diganti koma', (t) =>
+    t.replace(new RegExp(`([a-z0-9])(?:\\s+\\.\\s*|\\.\\s+|\\s*,\\s*)(${loose})\\b`, 'gi'), '$1.$2'),
+  );
+  step('TLD berangka', (t) =>
+    t.replace(/\.(c0m|n3t|0rg)\b/gi, (m) => m.replace(/0/g, 'o').replace(/3/g, 'e')),
+  );
+
+  return { text, tricks };
 }
 
 const URL_RE =
@@ -36,14 +116,57 @@ export interface ExtractedUrl {
   rootDomain: string;
   /** URL absolut yang valid untuk dikirim ke Safe Browsing. */
   url: string;
+  /**
+   * Trik penyamaran yang dipakai kalau link ini baru kebaca setelah
+   * di-deobfuscate; null kalau link ditulis apa adanya.
+   */
+  obfuscation: string | null;
 }
 
 /** Ambil semua URL / bare-domain dari sepotong teks. Hasilnya sudah unik. */
 export function extractUrls(rawInput: string): ExtractedUrl[] {
-  const input = deobfuscate(rawInput);
+  const { text: input, tricks } = deobfuscateWithTricks(rawInput);
+
+  // Domain yang sudah kebaca tanpa deobfuscate dianggap ditulis apa adanya.
+  // Link `hxxp://` dibuang dulu karena host-nya sendiri tetap polos.
+  const plainDomains = new Set(
+    matchUrls(rawInput.replace(/\bhxxps?\S*/gi, ' ')).map((m) => m.domain),
+  );
+
   const seen = new Set<string>();
   const out: ExtractedUrl[] = [];
 
+  for (const m of matchUrls(input)) {
+    const hxxp = new RegExp(`hxxps?\\S*?${escapeRegex(m.domain)}`, 'i').test(rawInput);
+    const obfuscated = hxxp || !plainDomains.has(m.domain);
+    // Hasil deobfuscate yang TLD-nya tidak dikenal hampir pasti potongan kalimat.
+    if (obfuscated && !isKnownTld(m.tld)) continue;
+
+    const key = m.url.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    out.push({
+      raw: m.full,
+      domain: m.domain,
+      rootDomain: rootDomainOf(m.domain),
+      url: m.url,
+      obfuscation: obfuscated ? (tricks.join(', ') || 'hxxp') : null,
+    });
+  }
+
+  return out;
+}
+
+interface UrlMatch {
+  full: string;
+  domain: string;
+  tld: string;
+  url: string;
+}
+
+function matchUrls(input: string): UrlMatch[] {
+  const out: UrlMatch[] = [];
   for (const match of input.matchAll(URL_RE)) {
     const [full, scheme, host, tld] = match;
     if (!host || !tld) continue;
@@ -54,15 +177,36 @@ export function extractUrls(rawInput: string): ExtractedUrl[] {
     const domain = normalizeDomain(host);
     if (!domain) continue;
 
-    const url = scheme ? full : `http://${full}`;
-    const key = url.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    out.push({ raw: full, domain, rootDomain: rootDomainOf(domain), url });
+    out.push({ full, domain, tld: tld.toLowerCase(), url: scheme ? full : `http://${full}` });
   }
-
   return out;
+}
+
+function isKnownTld(tld: string): boolean {
+  return tld.length === 2 || KNOWN_GTLDS.has(tld);
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Versi domain dengan angka samaran dikembalikan ke huruf (`s0akw1n.com` ->
+ * `soakwin.com`), untuk dicocokkan ke blacklist. `1` bisa berarti `i` atau `l`,
+ * jadi keduanya dicoba. Domain aslinya tidak ikut dikembalikan.
+ */
+export function deleetDomainVariants(domain: string): string[] {
+  if (!/[0-9]/.test(domain)) return [];
+  const base = domain
+    .replace(/0/g, 'o')
+    .replace(/3/g, 'e')
+    .replace(/4/g, 'a')
+    .replace(/5/g, 's')
+    .replace(/7/g, 't')
+    .replace(/8/g, 'b');
+  const variants = new Set([base.replace(/1/g, 'i'), base.replace(/1/g, 'l')]);
+  variants.delete(domain);
+  return [...variants];
 }
 
 /** `WWW.Example.COM.` -> `example.com` */

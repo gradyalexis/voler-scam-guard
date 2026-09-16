@@ -13,3 +13,10 @@ tsconfig.tsbuildinfo
 
 # Setting lokal per-mesin; .claude/settings.json sengaja di-commit.
 .claude/settings.local.json
+
+# Konfigurasi MCP berisi project_ref Supabase milik masing-masing; salin dari .mcp.json.example.
+.mcp.json
+
+# Sertifikat diunduh sendiri dari Supabase (lihat README).
+certs/*
+!certs/.gitkeep

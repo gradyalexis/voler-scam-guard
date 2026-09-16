@@ -16,6 +16,9 @@ export interface ImageScanResult {
   ocrText: string;
   confidence: number;
   qrCodes: QrCode[];
+  /** Gambar yang sudah diunduh, dipakai ulang untuk review AI tanpa unduh lagi. */
+  buffer: Buffer;
+  contentType: string | null;
 }
 
 /**
@@ -41,6 +44,8 @@ export async function scanImage(att: OcrAttachment): Promise<ImageScanResult | n
     ocrText: ocr?.text ?? '',
     confidence: ocr?.confidence ?? 0,
     qrCodes,
+    buffer,
+    contentType: att.contentType,
   };
 }
 

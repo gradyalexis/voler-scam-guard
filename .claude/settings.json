@@ -9,6 +9,7 @@
     ],
     "ask": [
       "Bash(./scripts/db-write.sh:*)",
+      "Bash(./scripts/migrate.sh:*)",
       "Bash(./scripts/restore.sh:*)",
       "Bash(./scripts/create-readonly-role.sh:*)"
     ]

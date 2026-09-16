@@ -1,7 +1,8 @@
 import { createLogger } from '../util/logger.js';
+import { reviewImage, isAiReviewAvailable } from './aiReview.js';
 import { findBlacklistedAccounts } from './blacklistCheck.js';
 import { analyzeScamText, type HeuristicResult } from './heuristicScanner.js';
-import { combinedText, scanImageAttachments } from './imageScanner.js';
+import { combinedText, scanImageAttachments, type ImageScanResult } from './imageScanner.js';
 import type { OcrAttachment } from './ocrScanner.js';
 import { describeQr } from './qrScanner.js';
 import { scanText, type UrlScanResult } from './urlScanner.js';
@@ -9,8 +10,13 @@ import type { EffectiveSettings } from './settings.js';
 
 const log = createLogger('detector');
 
-export type DetectionType = 'url' | 'image_ocr' | 'image_qr' | 'account';
-export type DetectionSource = 'blacklist' | 'safe_browsing' | 'heuristic';
+export type DetectionType = 'url' | 'image_ocr' | 'image_qr' | 'image_ai' | 'account';
+export type DetectionSource = 'blacklist' | 'safe_browsing' | 'heuristic' | 'ai';
+
+/** Di bawah ini verdict "scam" dari AI diabaikan. */
+const AI_MIN_CONFIDENCE = 0.6;
+/** Mulai dari sini temuan AI jadi `high` dan boleh dipakai untuk menghapus pesan. */
+const AI_HIGH_CONFIDENCE = 0.85;
 export type Severity = 'low' | 'medium' | 'high';
 
 export interface Finding {
@@ -19,8 +25,10 @@ export interface Finding {
   /** Nilai yang match: domain, nomor rekening, username, atau ringkasan pola. */
   matchedValue: string;
   severity: Severity;
-  /** Penjelasan singkat untuk embed mod-log. */
+  /** Penjelasan singkat; ikut tampil di peringatan publik dan DM ke pengirim. */
   detail: string | null;
+  /** Info internal yang hanya boleh tampil di mod-log (mis. model AI yang menilai). */
+  modNote?: string;
   /** URL attachment tempat temuan berasal (khusus hasil OCR). */
   evidenceUrl: string | null;
 }
@@ -44,6 +52,9 @@ export interface ScanOutcome {
  *   2. Identifier akun di isi pesan (rekening yang diketik langsung)
  *   3. OCR attachment    -> identifier akun + URL di dalam gambar + heuristik
  *                           pola scam (giveaway palsu, nitro gratis, dll)
+ *   4. Review AI         -> gambar yang lolos langkah 3 tapi punya tanda
+ *                           mencurigakan dinilai AI (Gemini/Groq/OpenRouter). AI hanya bisa MENAMBAH
+ *                           temuan, tidak pernah membatalkan temuan di atas.
  */
 export async function scanMessage(input: ScanInput): Promise<ScanOutcome> {
   const { content, attachments, settings } = input;
@@ -55,7 +66,11 @@ export async function scanMessage(input: ScanInput): Promise<ScanOutcome> {
     let urlScan: UrlScanResult | null = null;
 
     if (settings.scanUrls) {
-      urlScan = await scanText(content, { useSafeBrowsing: settings.useSafeBrowsing });
+      urlScan = await scanText(content, {
+        useSafeBrowsing: settings.useSafeBrowsing,
+        guildId: settings.guildId,
+        flagObfuscated: true,
+      });
       urlsFound += urlScan.found.length;
       for (const threat of urlScan.threats) {
         findings.push({
@@ -88,6 +103,8 @@ export async function scanMessage(input: ScanInput): Promise<ScanOutcome> {
 
   // 3 — attachment gambar: OCR + QR code.
   let ocrText: string | null = null;
+  /** Gambar yang belum kena temuan `high` tapi punya tanda mencurigakan. */
+  const aiCandidates: ImageScanResult[] = [];
   if (settings.scanImages && attachments.length > 0) {
     const images = await scanImageAttachments(attachments);
     if (images.length > 0) {
@@ -113,7 +130,10 @@ export async function scanMessage(input: ScanInput): Promise<ScanOutcome> {
 
       let urlScan: UrlScanResult | null = null;
       if (settings.scanUrls) {
-        urlScan = await scanText(text, { useSafeBrowsing: settings.useSafeBrowsing });
+        urlScan = await scanText(text, {
+          useSafeBrowsing: settings.useSafeBrowsing,
+          guildId: settings.guildId,
+        });
         urlsFound += urlScan.found.length;
         for (const threat of urlScan.threats) {
           const fromQr = image.qrCodes.some((qr) => qr.text.includes(threat.domain));
@@ -156,10 +176,49 @@ export async function scanMessage(input: ScanInput): Promise<ScanOutcome> {
         );
         if (finding) findings.push(finding);
       }
+
+      const suspiciousUrlCount = urlScan ? urlScan.found.length - urlScan.whitelisted.length : 0;
+      const hasSignal =
+        suspiciousUrlCount > 0 ||
+        image.qrCodes.length > 0 ||
+        analyzeScamText(text).hits.length > 0;
+      const alreadyHigh = findings.some((f) => f.evidenceUrl === image.url && f.severity === 'high');
+      if (hasSignal && !alreadyHigh) aiCandidates.push(image);
+    }
+  }
+
+  // 4 — review AI. Dilewati kalau pesan ini sudah pasti ditindak, supaya kuota
+  // gratis tidak habis untuk gambar yang hasilnya tidak mengubah apa-apa.
+  if (
+    settings.useAiReview &&
+    isAiReviewAvailable() &&
+    !findings.some((f) => f.severity === 'high')
+  ) {
+    for (const image of aiCandidates) {
+      const finding = await aiFinding(image);
+      if (finding) {
+        findings.push(finding);
+        if (finding.severity === 'high') break;
+      }
     }
   }
 
   return { findings: dedupe(findings), ocrText, urlsFound };
+}
+
+async function aiFinding(image: ImageScanResult): Promise<Finding | null> {
+  const review = await reviewImage(image.buffer, image.contentType);
+  if (!review || review.verdict !== 'scam' || review.confidence < AI_MIN_CONFIDENCE) return null;
+
+  return {
+    detectionType: 'image_ai',
+    source: 'ai',
+    matchedValue: review.category,
+    severity: review.confidence >= AI_HIGH_CONFIDENCE ? 'high' : 'medium',
+    detail: `AI (${Math.round(review.confidence * 100)}% yakin): ${review.reason}`,
+    modNote: review.model,
+    evidenceUrl: image.url,
+  };
 }
 
 /**
