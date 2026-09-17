@@ -13,10 +13,12 @@ const log = createLogger('detector');
 export type DetectionType = 'url' | 'image_ocr' | 'image_qr' | 'image_ai' | 'account';
 export type DetectionSource = 'blacklist' | 'safe_browsing' | 'heuristic' | 'ai';
 
-/** Di bawah ini verdict "scam" dari AI diabaikan. */
+/**
+ * Di bawah ini verdict "scam" dari AI diabaikan. Di atasnya pun temuan AI hanya
+ * `medium`: AI bisa salah yakin (mis. menuduh bukti transfer asli sebagai
+ * editan), jadi keputusan menghapus pesan diserahkan ke sinyal keras atau moderator.
+ */
 const AI_MIN_CONFIDENCE = 0.6;
-/** Mulai dari sini temuan AI jadi `high` dan boleh dipakai untuk menghapus pesan. */
-const AI_HIGH_CONFIDENCE = 0.85;
 export type Severity = 'low' | 'medium' | 'high';
 
 export interface Finding {
@@ -196,10 +198,7 @@ export async function scanMessage(input: ScanInput): Promise<ScanOutcome> {
   ) {
     for (const image of aiCandidates) {
       const finding = await aiFinding(image);
-      if (finding) {
-        findings.push(finding);
-        if (finding.severity === 'high') break;
-      }
+      if (finding) findings.push(finding);
     }
   }
 
@@ -214,7 +213,7 @@ async function aiFinding(image: ImageScanResult): Promise<Finding | null> {
     detectionType: 'image_ai',
     source: 'ai',
     matchedValue: review.category,
-    severity: review.confidence >= AI_HIGH_CONFIDENCE ? 'high' : 'medium',
+    severity: 'medium',
     detail: `AI (${Math.round(review.confidence * 100)}% yakin): ${review.reason}`,
     modNote: review.model,
     evidenceUrl: image.url,

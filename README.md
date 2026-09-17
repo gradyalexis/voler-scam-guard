@@ -311,13 +311,15 @@ ditindak (ada temuan `high` lain), AI dilewati.
 
 | Jawaban AI | Hasil |
 | --- | --- |
-| `scam`, yakin ≥ 85% | temuan `high` (`image_ai`/`ai`) — ditindak sesuai mode server |
-| `scam`, yakin 60–84% | temuan `medium` — masuk mod-log, pesan tidak dihapus |
+| `scam`, yakin ≥ 60% | temuan `medium` (`image_ai`/`ai`) — diperingatkan & masuk mod-log, pesan tidak dihapus |
 | `not_scam`, `unsure`, yakin < 60%, semua model gagal | tidak ada temuan |
 
 AI **hanya bisa menambah** temuan, tidak pernah membatalkan temuan blacklist,
 Safe Browsing, atau heuristik. Ini sengaja: gambar scam bisa berisi tulisan yang
-menyuruh AI menjawab "aman".
+menyuruh AI menjawab "aman". Sebaliknya, AI saja **tidak pernah menghapus pesan**:
+model bisa salah yakin (mis. menuduh bukti transfer asli sebagai editan karena
+tanggalnya "masa depan" menurut cutoff model), jadi penghapusan butuh sinyal keras
+atau keputusan moderator. Tanggal hari ini (WIB) ikut dikirim di prompt.
 
 **Kuota & privasi**
 
